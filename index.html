@@ -1,0 +1,550 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Raft Consensus Lab</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<style>
+  /* Layout idea: status strip on top, the cluster on the left, controls + replicated logs + event feed on the right. */
+  :root {
+    --bg: #eceef4;
+    --surface: #f9fafc;
+    --ink: #171b2c;
+    --muted: #5a617a;
+    --line: #cdd2e0;
+    --accent: #3346c9;
+    --leader: #12805c;
+    --candidate: #b86a00;
+    --follower: #6a728c;
+    --down: #a9aebd;
+    --danger: #c23b3b;
+    --on-state: #ffffff;
+    --term-s: 55%;
+    --term-l: 42%;
+    --font-body: "Instrument Sans", "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+    --font-mono: "JetBrains Mono", ui-monospace, Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --bg: #11131c; --surface: #191c29; --ink: #e8eaf3; --muted: #9299b3; --line: #2e3348;
+      --accent: #8f9dff; --leader: #3fcf9a; --candidate: #f0a63a; --follower: #7d86a6; --down: #474c61;
+      --danger: #ff7a7a; --on-state: #11131c; --term-s: 60%; --term-l: 66%;
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --bg: #11131c; --surface: #191c29; --ink: #e8eaf3; --muted: #9299b3; --line: #2e3348;
+    --accent: #8f9dff; --leader: #3fcf9a; --candidate: #f0a63a; --follower: #7d86a6; --down: #474c61;
+    --danger: #ff7a7a; --on-state: #11131c; --term-s: 60%; --term-l: 66%;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body { background: var(--bg); color: var(--ink); font-family: var(--font-body); font-size: 15px; line-height: 1.5; padding: 24px 16px 48px; }
+  .wrap { max-width: 1180px; margin: 0 auto; display: flex; flex-direction: column; gap: 16px; }
+  header { display: flex; flex-direction: column; gap: 4px; }
+  h1 { font-size: 26px; font-weight: 700; letter-spacing: -0.015em; margin: 0; text-wrap: balance; }
+  h2 { font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.07em; color: var(--muted); margin: 0; }
+  header p { margin: 0; color: var(--muted); max-width: 68ch; }
+  .status { display: flex; flex-wrap: wrap; gap: 8px 28px; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 12px 16px; }
+  .status div { display: flex; flex-direction: column; }
+  .status dt { font-size: 12px; color: var(--muted); }
+  .status dd { margin: 0; font-family: var(--font-mono); font-weight: 600; font-size: 17px; font-variant-numeric: tabular-nums; }
+  dl { margin: 0; }
+  .main { display: grid; grid-template-columns: minmax(0, 1.02fr) minmax(0, 1fr); gap: 16px; align-items: start; }
+  @media (max-width: 900px) { .main { grid-template-columns: minmax(0, 1fr); } }
+  .card { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 16px; display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+  .side { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+  #cluster { width: 100%; max-width: 560px; aspect-ratio: 1 / 1; display: block; margin: 0 auto; cursor: pointer; touch-action: manipulation; }
+  .legend { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 13px; color: var(--muted); }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+  .dot.ring { background: transparent; border: 2px solid var(--candidate); }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  button, select { font: inherit; font-size: 14px; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 7px 12px; cursor: pointer; }
+  button:hover, select:hover { border-color: var(--accent); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--surface); font-weight: 600; }
+  button:focus-visible, select:focus-visible, #cluster:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  .sel-title { font-weight: 600; }
+  .sel-title small { font-weight: 400; color: var(--muted); }
+  .logs { display: flex; flex-direction: column; gap: 6px; overflow-x: auto; padding-bottom: 2px; }
+  .logrow { display: flex; align-items: center; gap: 8px; min-width: max-content; }
+  .logrow button { font-family: var(--font-mono); font-weight: 600; padding: 3px 8px; min-width: 44px; }
+  .logrow button[aria-pressed="true"] { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+  .pill { font-size: 12px; font-weight: 600; border-radius: 99px; padding: 2px 9px; min-width: 82px; text-align: center; color: var(--on-state); }
+  .pill.leader { background: var(--leader); } .pill.candidate { background: var(--candidate); }
+  .pill.follower { background: var(--follower); } .pill.stopped { background: var(--down); }
+  .pill.cut { outline: 2px dashed var(--danger); outline-offset: 1px; }
+  .cells { display: flex; gap: 3px; }
+  .cell { font-family: var(--font-mono); font-size: 12px; min-width: 36px; padding: 3px 4px; border-radius: 4px; text-align: center; border: 2px solid hsl(var(--h) var(--term-s) var(--term-l)); }
+  .cell.committed { background: hsl(var(--h) var(--term-s) var(--term-l)); color: var(--on-state); }
+  .cell.pending { border-style: dashed; color: var(--ink); }
+  .empty { color: var(--muted); font-size: 13px; }
+  .key { font-size: 13px; color: var(--muted); margin: 0; }
+  #feed { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; max-height: 250px; overflow-y: auto; font-size: 14px; }
+  #feed li { display: grid; grid-template-columns: 58px minmax(0, 1fr); gap: 8px; }
+  #feed time { font-family: var(--font-mono); font-size: 12px; color: var(--muted); padding-top: 2px; font-variant-numeric: tabular-nums; }
+  #feed li.warn span { color: var(--danger); }
+  #feed li.good span { color: var(--leader); }
+  .try ol { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 8px; max-width: 68ch; }
+  .try p { margin: 0; max-width: 68ch; color: var(--muted); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Raft Consensus Lab</h1>
+    <p>Five servers keep one shared log in agreement, even when some of them crash or lose their network. This is the algorithm behind etcd, the database inside every Kubernetes cluster. Break things and watch it recover.</p>
+  </header>
+
+  <dl class="status" aria-live="off">
+    <div><dt>Leader</dt><dd id="st-leader">none</dd></div>
+    <div><dt>Term</dt><dd id="st-term">0</dd></div>
+    <div><dt>Committed writes</dt><dd id="st-commit">0</dd></div>
+    <div><dt>Servers reachable</dt><dd id="st-up">5 / 5</dd></div>
+    <div><dt>Can accept writes</dt><dd id="st-quorum">yes</dd></div>
+  </dl>
+
+  <div class="main">
+    <section class="card" aria-label="Cluster">
+      <canvas id="cluster" tabindex="0" aria-label="Diagram of the five servers and the messages between them. Use the S1 to S5 buttons in the logs panel to select a server from the keyboard."></canvas>
+      <div class="legend">
+        <span><i class="dot" style="background:var(--leader)"></i>Leader</span>
+        <span><i class="dot" style="background:var(--candidate)"></i>Candidate</span>
+        <span><i class="dot" style="background:var(--follower)"></i>Follower</span>
+        <span><i class="dot" style="background:var(--down)"></i>Stopped</span>
+        <span><i class="dot" style="background:var(--accent)"></i>Log message</span>
+        <span><i class="dot ring"></i>Vote message</span>
+      </div>
+      <p class="key">The shrinking ring around a follower is its patience. If it runs out before a leader checks in, that server calls an election.</p>
+    </section>
+
+    <div class="side">
+      <section class="card" aria-label="Controls">
+        <div class="row">
+          <button class="primary" id="write" type="button">Send a client write</button>
+          <button id="pause" type="button">Pause</button>
+          <label for="speed" class="key">Speed</label>
+          <select id="speed">
+            <option value="0.4">Slow</option>
+            <option value="1" selected>Normal</option>
+            <option value="2.5">Fast</option>
+          </select>
+          <button id="reset" type="button">Reset cluster</button>
+        </div>
+        <div class="sel-title" id="sel-title">S1 <small>selected</small></div>
+        <div class="row">
+          <button id="stop" type="button">Stop S1</button>
+          <button id="cut" type="button">Cut S1 off the network</button>
+          <button id="timeout" type="button">Make S1 call an election</button>
+        </div>
+        <div class="row">
+          <button id="kill-leader" type="button">Stop the current leader</button>
+          <button id="heal" type="button">Repair everything</button>
+        </div>
+      </section>
+
+      <section class="card" aria-label="Replicated logs">
+        <h2>Each server's copy of the log</h2>
+        <div class="logs" id="logs"></div>
+        <p class="key">Filled = committed, safe on a majority. Dashed = accepted but not yet safe. Colour = the term it was written in.</p>
+      </section>
+
+      <section class="card" aria-label="Events">
+        <h2>What just happened</h2>
+        <ol id="feed"></ol>
+      </section>
+    </div>
+  </div>
+
+  <section class="card try">
+    <h2>Three experiments</h2>
+    <ol>
+      <li><b>Crash the leader.</b> Press "Stop the current leader". A follower runs out of patience, asks for votes, and a new leader takes over in a higher term. No committed write is lost.</li>
+      <li><b>Lose the majority.</b> Stop three servers. The two left can never win an election, so writes stop being committed. The cluster chooses to be unavailable instead of wrong.</li>
+      <li><b>Split brain.</b> Select the leader and cut it off the network. Keep it selected and send two writes: it accepts them but can never commit them (dashed). Meanwhile the other four elect a new leader. Reconnect the old one: it steps down at once, and on the next client write it throws away its dashed entries to match the new leader.</li>
+    </ol>
+  </section>
+</div>
+
+<script>
+(function () {
+  "use strict";
+  var N = 5, HEARTBEAT = 1100, ELECT_MIN = 3000, ELECT_SPREAD = 3000;
+  var nodes, msgs, now, selected = 0, paused = false, speed = 1, writeCount, feed, dirty = true;
+
+  /* ---------- Raft ---------- */
+  function resetTimer(n) { n.span = ELECT_MIN + Math.random() * ELECT_SPREAD; n.due = now + n.span; }
+  function name(id) { return "S" + (id + 1); }
+  function say(text, kind) {
+    feed.unshift({ t: now, text: text, kind: kind || "" });
+    if (feed.length > 40) feed.pop();
+    dirty = true;
+  }
+  function init() {
+    nodes = []; msgs = []; now = 0; writeCount = 0; feed = [];
+    for (var i = 0; i < N; i++) {
+      var n = { id: i, state: "follower", term: 0, votedFor: null, log: [], commit: 0, votes: {}, next: [], match: [], hbDue: 0, alive: true, cut: false, span: 1, due: 0 };
+      resetTimer(n);
+      nodes.push(n);
+    }
+    say("Five servers started as followers. Nobody is leader yet.");
+  }
+  function send(from, to, type, body) {
+    msgs.push({ from: from.id, to: to.id, type: type, body: body, start: now, dur: 420 + Math.random() * 160, blocked: from.cut || to.cut });
+  }
+  function peers(n, fn) { for (var i = 0; i < N; i++) if (i !== n.id) fn(nodes[i]); }
+  function lastTerm(n) { return n.log.length ? n.log[n.log.length - 1].term : 0; }
+
+  function stepDown(n, term) {
+    var was = n.state;
+    n.term = term; n.state = "follower"; n.votedFor = null;
+    if (was !== "follower") { resetTimer(n); say(name(n.id) + " saw a higher term (" + term + ") and stepped down to follower."); }
+    dirty = true;
+  }
+  function startElection(n) {
+    n.state = "candidate"; n.term++; n.votedFor = n.id; n.votes = {}; n.votes[n.id] = true;
+    resetTimer(n);
+    say(name(n.id) + " heard nothing from a leader and called an election for term " + n.term + ".");
+    peers(n, function (p) { send(n, p, "voteReq", { term: n.term, lastIndex: n.log.length, lastTerm: lastTerm(n) }); });
+  }
+  function becomeLeader(n) {
+    n.state = "leader";
+    var count = Object.keys(n.votes).length;
+    for (var i = 0; i < N; i++) { n.next[i] = n.log.length; n.match[i] = 0; }
+    say(name(n.id) + " won " + count + " of " + N + " votes and is leader for term " + n.term + ".", "good");
+    broadcast(n);
+  }
+  function sendAppend(n, p) {
+    var prev = n.next[p.id];
+    send(n, p, "append", {
+      term: n.term, prevIndex: prev, prevTerm: prev > 0 ? n.log[prev - 1].term : 0,
+      entries: n.log.slice(prev), leaderCommit: n.commit
+    });
+  }
+  function broadcast(n) { peers(n, function (p) { sendAppend(n, p); }); n.hbDue = now + HEARTBEAT; }
+
+  function deliver(m) {
+    var n = nodes[m.to], b = m.body, from = nodes[m.from];
+    if (b.term > n.term) stepDown(n, b.term);
+    if (m.type === "voteReq") {
+      var upToDate = b.lastTerm > lastTerm(n) || (b.lastTerm === lastTerm(n) && b.lastIndex >= n.log.length);
+      var grant = b.term === n.term && (n.votedFor === null || n.votedFor === m.from) && upToDate;
+      if (grant) { n.votedFor = m.from; resetTimer(n); }
+      send(n, from, "voteRes", { term: n.term, granted: grant });
+    } else if (m.type === "voteRes") {
+      if (n.state === "candidate" && b.term === n.term && b.granted) {
+        n.votes[m.from] = true;
+        if (Object.keys(n.votes).length > N / 2) becomeLeader(n);
+      }
+    } else if (m.type === "append") {
+      if (b.term < n.term) { send(n, from, "appendRes", { term: n.term, ok: false, match: 0 }); return; }
+      if (n.state !== "follower") { n.state = "follower"; }
+      resetTimer(n);
+      var fits = n.log.length >= b.prevIndex && (b.prevIndex === 0 || n.log[b.prevIndex - 1].term === b.prevTerm);
+      if (!fits) { send(n, from, "appendRes", { term: n.term, ok: false, match: 0 }); return; }
+      for (var i = 0; i < b.entries.length; i++) {
+        var idx = b.prevIndex + i;
+        if (n.log[idx] && n.log[idx].term !== b.entries[i].term) {
+          var dropped = n.log.length - idx;
+          n.log.length = idx;
+          say(name(n.id) + " threw away " + dropped + " unsafe " + (dropped === 1 ? "entry" : "entries") + " that the new leader never had.", "warn");
+        }
+        if (!n.log[idx]) n.log.push(b.entries[i]);
+      }
+      var matched = b.prevIndex + b.entries.length;
+      n.commit = Math.max(n.commit, Math.min(b.leaderCommit, matched));
+      send(n, from, "appendRes", { term: n.term, ok: true, match: matched });
+      dirty = true;
+    } else if (m.type === "appendRes") {
+      if (n.state !== "leader" || b.term !== n.term) return;
+      if (b.ok) {
+        n.match[m.from] = Math.max(n.match[m.from], b.match);
+        n.next[m.from] = n.match[m.from];
+        for (var c = n.log.length; c > n.commit; c--) {
+          if (n.log[c - 1].term !== n.term) continue;
+          var have = 1;
+          for (var k = 0; k < N; k++) if (k !== n.id && n.match[k] >= c) have++;
+          if (have > N / 2) {
+            say("Write " + n.log[c - 1].cmd + " is now on " + have + " servers: committed.", "good");
+            n.commit = c; dirty = true; break;
+          }
+        }
+      } else {
+        n.next[m.from] = Math.max(0, n.next[m.from] - 1);
+        sendAppend(n, from);
+      }
+    }
+  }
+
+  function step(dt) {
+    now += dt;
+    var keep = [];
+    for (var i = 0; i < msgs.length; i++) {
+      var m = msgs[i], p = (now - m.start) / m.dur;
+      if (m.blocked) { if (p < 0.45) keep.push(m); continue; }
+      if (p < 1) { keep.push(m); continue; }
+      var to = nodes[m.to], from = nodes[m.from];
+      if (to.alive && !to.cut && !from.cut) deliver(m);
+    }
+    // deliver() may have queued replies
+    for (var j = 0; j < msgs.length; j++) if (msgs[j].start === now && keep.indexOf(msgs[j]) < 0) keep.push(msgs[j]);
+    msgs = keep;
+    for (var k = 0; k < N; k++) {
+      var n = nodes[k];
+      if (!n.alive) continue;
+      if (n.state === "leader") { if (now >= n.hbDue) broadcast(n); }
+      else if (now >= n.due) startElection(n);
+    }
+  }
+
+  /* ---------- actions ---------- */
+  function currentLeader(reachableOnly) {
+    var best = null;
+    for (var i = 0; i < N; i++) {
+      var n = nodes[i];
+      if (!n.alive || n.state !== "leader") continue;
+      if (reachableOnly && n.cut) continue;
+      if (!best || n.term > best.term) best = n;
+    }
+    return best;
+  }
+  function clientWrite() {
+    var s = nodes[selected];
+    var target = (s.alive && s.state === "leader") ? s : (currentLeader(true) || currentLeader(false));
+    if (!target) { say("A client tried to write, but there is no leader to take it. Request refused.", "warn"); return; }
+    writeCount++;
+    var cmd = "w" + writeCount;
+    target.log.push({ term: target.term, cmd: cmd });
+    say("Client write " + cmd + " accepted by leader " + name(target.id) + (target.cut ? ", which is cut off and cannot commit it." : ". Copying it to the others."), target.cut ? "warn" : "");
+    broadcast(target);
+  }
+  function setAlive(n, alive) {
+    if (n.alive === alive) return;
+    n.alive = alive;
+    if (alive) { n.state = "follower"; resetTimer(n); say(name(n.id) + " restarted with its saved log and term."); }
+    else { say(name(n.id) + " crashed" + (n.state === "leader" ? " while it was leader." : "."), "warn"); n.state = "follower"; }
+    dirty = true;
+  }
+  function setCut(n, cut) {
+    if (n.cut === cut) return;
+    n.cut = cut;
+    say(cut ? name(n.id) + " lost its network. It is still running but nobody can hear it." : name(n.id) + " is back on the network.", cut ? "warn" : "");
+    dirty = true;
+  }
+
+  /* ---------- drawing ---------- */
+  var canvas = document.getElementById("cluster"), ctx = canvas.getContext("2d");
+  var SIZE = 560, R = 196, NODE_R = 40, colors = {};
+  function readColors() {
+    var cs = getComputedStyle(document.documentElement);
+    ["bg", "surface", "ink", "muted", "line", "accent", "leader", "candidate", "follower", "down", "danger", "on-state"].forEach(function (k) {
+      colors[k] = cs.getPropertyValue("--" + k).trim();
+    });
+  }
+  function pos(i) {
+    var a = -Math.PI / 2 + i * 2 * Math.PI / N;
+    return { x: SIZE / 2 + Math.cos(a) * R, y: SIZE / 2 + Math.sin(a) * R };
+  }
+  function fit() {
+    var w = canvas.clientWidth || SIZE, dpr = window.devicePixelRatio || 1;
+    canvas.width = Math.round(w * dpr); canvas.height = Math.round(w * dpr);
+    ctx.setTransform(canvas.width / SIZE, 0, 0, canvas.height / SIZE, 0, 0);
+  }
+  function draw() {
+    ctx.clearRect(0, 0, SIZE, SIZE);
+    var i, j, a, b;
+    // links
+    for (i = 0; i < N; i++) for (j = i + 1; j < N; j++) {
+      a = pos(i); b = pos(j);
+      var broken = nodes[i].cut || nodes[j].cut, dead = !nodes[i].alive || !nodes[j].alive;
+      ctx.strokeStyle = broken ? colors.danger : colors.line;
+      ctx.globalAlpha = dead ? 0.25 : broken ? 0.45 : 1;
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash(broken ? [3, 7] : []);
+      ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+    }
+    ctx.setLineDash([]); ctx.globalAlpha = 1;
+    // messages
+    for (i = 0; i < msgs.length; i++) {
+      var m = msgs[i], p = Math.min(1, (now - m.start) / m.dur);
+      a = pos(m.from); b = pos(m.to);
+      var x = a.x + (b.x - a.x) * p, y = a.y + (b.y - a.y) * p;
+      var vote = m.type === "voteReq" || m.type === "voteRes", reply = m.type === "voteRes" || m.type === "appendRes";
+      var hasData = m.type === "append" && m.body.entries.length > 0;
+      ctx.globalAlpha = m.blocked ? Math.max(0, 1 - p / 0.45) : 1;
+      var rad = reply ? 4 : hasData ? 8 : 5.5;
+      ctx.beginPath(); ctx.arc(x, y, rad, 0, 6.2832);
+      if (vote) {
+        ctx.lineWidth = 2.5; ctx.strokeStyle = colors.candidate; ctx.fillStyle = colors.surface;
+        ctx.fill(); ctx.stroke();
+        if (m.type === "voteRes" && m.body.granted) { ctx.fillStyle = colors.candidate; ctx.fill(); }
+      } else {
+        ctx.fillStyle = reply && !m.body.ok ? colors.danger : colors.accent;
+        ctx.globalAlpha *= reply ? 0.6 : 1;
+        ctx.fill();
+      }
+    }
+    ctx.globalAlpha = 1;
+    // nodes
+    for (i = 0; i < N; i++) {
+      var n = nodes[i], c = pos(i);
+      var fill = !n.alive ? colors.down : colors[n.state];
+      if (i === selected) {
+        ctx.strokeStyle = colors.accent; ctx.lineWidth = 2; ctx.setLineDash([5, 5]);
+        ctx.beginPath(); ctx.arc(c.x, c.y, NODE_R + 17, 0, 6.2832); ctx.stroke(); ctx.setLineDash([]);
+      }
+      // patience ring / leader ring
+      if (n.alive && n.state !== "leader") {
+        var left = Math.max(0, Math.min(1, (n.due - now) / n.span));
+        ctx.strokeStyle = colors.line; ctx.lineWidth = 5;
+        ctx.beginPath(); ctx.arc(c.x, c.y, NODE_R + 8, 0, 6.2832); ctx.stroke();
+        ctx.strokeStyle = left < 0.25 ? colors.candidate : colors.follower;
+        ctx.lineCap = "round";
+        ctx.beginPath(); ctx.arc(c.x, c.y, NODE_R + 8, -Math.PI / 2, -Math.PI / 2 + left * 6.2832); ctx.stroke();
+        ctx.lineCap = "butt";
+      } else if (n.alive) {
+        ctx.strokeStyle = colors.leader; ctx.lineWidth = 3;
+        ctx.beginPath(); ctx.arc(c.x, c.y, NODE_R + 8, 0, 6.2832); ctx.stroke();
+      }
+      ctx.fillStyle = fill;
+      ctx.beginPath(); ctx.arc(c.x, c.y, NODE_R, 0, 6.2832); ctx.fill();
+      if (n.cut) {
+        ctx.strokeStyle = colors.danger; ctx.lineWidth = 3; ctx.setLineDash([6, 5]);
+        ctx.beginPath(); ctx.arc(c.x, c.y, NODE_R - 1.5, 0, 6.2832); ctx.stroke(); ctx.setLineDash([]);
+      }
+      ctx.fillStyle = colors["on-state"];
+      ctx.textAlign = "center"; ctx.textBaseline = "middle";
+      ctx.font = '700 21px "Instrument Sans", "Segoe UI", Arial, sans-serif';
+      ctx.fillText(name(i), c.x, c.y - 7);
+      ctx.font = '600 12px "JetBrains Mono", Menlo, Consolas, monospace';
+      ctx.fillText(n.alive ? "term " + n.term : "stopped", c.x, c.y + 13);
+      // role label outside the circle
+      ctx.fillStyle = colors.muted;
+      ctx.font = '500 13px "Instrument Sans", "Segoe UI", Arial, sans-serif';
+      var role = !n.alive ? "" : n.state + (n.cut ? " (cut off)" : "");
+      ctx.fillText(role, c.x, c.y + NODE_R + 30);
+    }
+  }
+
+  /* ---------- panels ---------- */
+  var $ = function (id) { return document.getElementById(id); };
+  var logsEl = $("logs"), rows = [];
+  function buildRows() {
+    logsEl.innerHTML = "";
+    rows = [];
+    for (var i = 0; i < N; i++) {
+      var row = document.createElement("div"); row.className = "logrow";
+      var btn = document.createElement("button"); btn.type = "button"; btn.textContent = name(i); btn.id = "pick-" + i;
+      btn.setAttribute("aria-label", "Select " + name(i));
+      (function (id) { btn.addEventListener("click", function () { selected = id; dirty = true; }); })(i);
+      var pill = document.createElement("span"); pill.className = "pill";
+      var cells = document.createElement("div"); cells.className = "cells";
+      row.appendChild(btn); row.appendChild(pill); row.appendChild(cells);
+      logsEl.appendChild(row);
+      rows.push({ btn: btn, pill: pill, cells: cells });
+    }
+  }
+  function clock(ms) { var s = ms / 1000; return (s < 100 ? s.toFixed(1) : Math.round(s)) + "s"; }
+  function paint() {
+    var i, n, html;
+    for (i = 0; i < N; i++) {
+      n = nodes[i];
+      var r = rows[i], st = n.alive ? n.state : "stopped";
+      r.btn.setAttribute("aria-pressed", i === selected ? "true" : "false");
+      r.pill.className = "pill " + st + (n.cut ? " cut" : "");
+      r.pill.textContent = st + " · t" + n.term;
+      html = "";
+      for (var k = 0; k < n.log.length; k++) {
+        var e = n.log[k];
+        html += '<span class="cell ' + (k < n.commit ? "committed" : "pending") + '" style="--h:' + ((e.term * 67 + 200) % 360) + '" title="Entry ' + (k + 1) + ", written in term " + e.term + (k < n.commit ? ", committed" : ", not yet committed") + '">' + e.cmd + "</span>";
+      }
+      r.cells.innerHTML = html || '<span class="empty">empty</span>';
+    }
+    var lead = currentLeader(true) || currentLeader(false), maxTerm = 0, maxCommit = 0, up = 0;
+    for (i = 0; i < N; i++) { n = nodes[i]; maxTerm = Math.max(maxTerm, n.term); maxCommit = Math.max(maxCommit, n.commit); if (n.alive && !n.cut) up++; }
+    $("st-leader").textContent = lead ? name(lead.id) + (lead.cut ? " (cut off)" : "") : "none";
+    $("st-term").textContent = maxTerm;
+    $("st-commit").textContent = maxCommit;
+    $("st-up").textContent = up + " / " + N;
+    $("st-quorum").textContent = up > N / 2 ? "yes" : "no, majority lost";
+    $("st-quorum").style.color = up > N / 2 ? "" : "var(--danger)";
+    var s = nodes[selected], nm = name(selected);
+    $("sel-title").innerHTML = nm + " <small>selected: " + (s.alive ? s.state : "stopped") + (s.cut ? ", cut off" : "") + "</small>";
+    $("stop").textContent = s.alive ? "Stop " + nm : "Restart " + nm;
+    $("cut").textContent = s.cut ? "Reconnect " + nm : "Cut " + nm + " off the network";
+    $("timeout").textContent = "Make " + nm + " call an election";
+    $("timeout").disabled = !s.alive || s.state === "leader";
+    $("kill-leader").disabled = !lead;
+    html = "";
+    for (i = 0; i < feed.length; i++) html += '<li class="' + feed[i].kind + '"><time>' + clock(feed[i].t) + "</time><span>" + feed[i].text + "</span></li>";
+    $("feed").innerHTML = html;
+    dirty = false;
+  }
+
+  /* ---------- wiring ---------- */
+  $("write").addEventListener("click", function () { clientWrite(); });
+  $("pause").addEventListener("click", function () { paused = !paused; this.textContent = paused ? "Resume" : "Pause"; });
+  $("speed").addEventListener("change", function () { speed = parseFloat(this.value) || 1; });
+  $("reset").addEventListener("click", function () { init(); warmUp(); });
+  $("stop").addEventListener("click", function () { var n = nodes[selected]; setAlive(n, !n.alive); });
+  $("cut").addEventListener("click", function () { var n = nodes[selected]; setCut(n, !n.cut); });
+  $("timeout").addEventListener("click", function () { var n = nodes[selected]; if (n.alive && n.state !== "leader") startElection(n); });
+  $("kill-leader").addEventListener("click", function () { var l = currentLeader(true) || currentLeader(false); if (l) { selected = l.id; setAlive(l, false); } });
+  $("heal").addEventListener("click", function () { nodes.forEach(function (n) { setCut(n, false); setAlive(n, true); }); });
+  canvas.addEventListener("click", function (ev) {
+    var r = canvas.getBoundingClientRect(), k = SIZE / r.width;
+    var x = (ev.clientX - r.left) * k, y = (ev.clientY - r.top) * k;
+    for (var i = 0; i < N; i++) {
+      var c = pos(i);
+      if (Math.hypot(c.x - x, c.y - y) <= NODE_R + 14) { selected = i; dirty = true; }
+    }
+  });
+  window.addEventListener("resize", fit);
+  if (window.matchMedia) {
+    var mq = window.matchMedia("(prefers-color-scheme: dark)");
+    if (mq.addEventListener) mq.addEventListener("change", readColors);
+  }
+  new MutationObserver(readColors).observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+
+  // Open on a working cluster: a leader elected and a few writes committed.
+  function run(ms) { for (var t = 0; t < ms; t += 40) step(40); }
+  function warmUp() {
+    run(9000);
+    for (var i = 0; i < 3; i++) { clientWrite(); run(2600); }
+    var l = currentLeader(true);
+    if (l) selected = l.id;
+    dirty = true;
+  }
+
+  var last = null, lastPaint = 0;
+  function frame(t) {
+    if (last === null) last = t;
+    var dt = Math.min(80, t - last); last = t;
+    if (!paused) {
+      var total = dt * speed;
+      while (total > 0) { var s = Math.min(40, total); step(s); total -= s; }
+    }
+    draw();
+    if (dirty && t - lastPaint > 120) { paint(); lastPaint = t; }
+    requestAnimationFrame(frame);
+  }
+
+  init();
+  buildRows();
+  readColors();
+  fit();
+  warmUp();
+  if (window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches) { paused = true; $("pause").textContent = "Resume"; }
+  paint();
+  draw();
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(function () { draw(); });
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
